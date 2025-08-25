@@ -6,11 +6,58 @@ unsafe extern "C" {
     // fn sys_icache_invalidate(start: *const libc::c_void, size: libc::size_t);
 }
 
-fn emit_mov_x0_immediate(value: u16) -> u32 {
-    let base_mov_instruction: u32 = 0xd2800000;
-    base_mov_instruction | ((value as u32) << 5)
+fn mov_immediate(register: u8, value: u16) -> u32 {
+    assert!(register < 32);
+    let base: u32 = 0xd2800000;
+    base | ((value as u32) << 5) | (register as u32)
 }
 
+fn add_reg_reg_reg(rd: u8, rn: u8, rm: u8) -> u32 {
+    let base = 0x8b000000;
+    base | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+}
+
+fn ret() -> u32 {
+    0xd65f03c0
+}
+
+fn push_literal(value: u16) -> Vec<u32> {
+    let mut instructions = Vec::new();
+
+    // Put the literal in X0: mov x0, #lit
+    instructions.push(mov_immediate(0, value));
+
+    // Decrement stack pointer by 8 bytes: sub x9, x9, 8
+    instructions.push(0xd1002129);
+
+    // Store x0 to [x9]: str x0, [x9]
+    instructions.push(0xf9000120);
+
+    instructions
+}
+
+fn pop_into_reg(register: u8) -> Vec<u32> {
+    let ldr = {
+        let base: u32 = 0xf9400120;
+        base | (register as u32)
+    };
+
+    vec![
+        ldr,        // ldr x{register}, [x9]
+        0x91002129, // add x29, x29, #8
+    ]
+}
+
+fn add_top_two_into_x0() -> Vec<u32> {
+    vec![
+        pop_into_reg(1),
+        pop_into_reg(2),
+        vec![add_reg_reg_reg(0, 1, 2)],
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
 fn main() {
     let size = 4096;
 
@@ -25,9 +72,31 @@ fn main() {
         )
     };
 
+    let stack_size = 4096;
+    let stack_ptr = unsafe {
+        mmap(
+            ptr::null_mut(),
+            stack_size,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANON,
+            -1,
+            0,
+        )
+    };
+
+    let stack_top = unsafe { (stack_ptr as *mut u8).add(stack_size) };
+
     let mut instructions: Vec<u32> = Vec::new();
-    instructions.push(emit_mov_x0_immediate(42));
-    instructions.push(0xD65F03C0);
+    // The JIT function is called with the stack we allocated for its use. The
+    // very first instruction we execute takes that argument from x0 and puts
+    // it in x9. The rest of the instructions will use register x9 as the top of
+    // their stack.
+    let mov_x9_x0 = 0xaa0003e9;
+    instructions.push(mov_x9_x0);
+    instructions.extend(push_literal(1));
+    instructions.extend(push_literal(41));
+    instructions.extend(add_top_two_into_x0());
+    instructions.push(ret());
 
     unsafe {
         std::ptr::copy_nonoverlapping(
@@ -44,10 +113,11 @@ fn main() {
         mprotect(code_ptr, size, PROT_READ | PROT_EXEC);
     }
 
-    type JitFn = unsafe extern "C" fn() -> i64;
+    type JitFn = unsafe extern "C" fn(*mut u8) -> i64;
+
     let jit_fn: JitFn = unsafe { std::mem::transmute(code_ptr) };
 
-    let result = unsafe { jit_fn() };
+    let result = unsafe { jit_fn(stack_top as *mut u8) };
 
     println!("Answer: {}", result);
 }
