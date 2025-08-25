@@ -33,11 +33,7 @@ fn push_literal(value: u16) -> Vec<u32> {
     // Put the literal in X0: mov x0, #lit
     instructions.push(mov_immediate(0, value));
 
-    // Decrement stack pointer by 8 bytes: sub x9, x9, 8
-    instructions.push(0xd1002129);
-
-    // Store x0 to [x9]: str x0, [x9]
-    instructions.push(0xf9000120);
+    instructions.extend(push_x0());
 
     instructions
 }
@@ -54,11 +50,19 @@ fn pop_into_reg(register: u8) -> Vec<u32> {
     ]
 }
 
-fn add_top_two_into_x0() -> Vec<u32> {
+fn push_x0() -> Vec<u32> {
+    vec![
+        0xd1002129, // sub x9, x9, 8
+        0xf9000120, // str x0, [x9]
+    ]
+}
+
+fn add_top_two_and_push() -> Vec<u32> {
     vec![
         pop_into_reg(1),
         pop_into_reg(2),
         vec![add_reg_reg_reg(0, 1, 2)],
+        push_x0(),
     ]
     .into_iter()
     .flatten()
@@ -123,16 +127,22 @@ fn main() {
     // The JIT function is called with the stack we allocated for its use. The
     // very first instruction we execute takes that argument from x0 and puts
     // it in x9. The rest of the instructions will use register x9 as the top of
-    // their stack.
+    // their stack. I did this because manipulating sp would segfault. Literally
+    // even subtracting from it: "sub sp, sp, #8" would segfault. So we allocate
+    // our own memory for the stack and pass it in.
     let mov_x9_x0 = 0xaa0003e9;
     instructions.push(mov_x9_x0);
 
     for item in expression {
         match item {
             Token::Number(x) => instructions.extend(push_literal(x)),
-            Token::Plus => instructions.extend(add_top_two_into_x0()),
+            Token::Plus => instructions.extend(add_top_two_and_push()),
         }
     }
+
+    // The final result will be at the top of the stack. Pop that result into x0
+    // and return it.
+    instructions.extend(pop_into_reg(0));
     instructions.push(ret());
 
     unsafe {
