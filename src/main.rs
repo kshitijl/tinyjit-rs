@@ -23,6 +23,11 @@ fn add_reg_reg_reg(rd: u8, rn: u8, rm: u8) -> u32 {
     base | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
 
+fn mul_reg_reg_reg(rd: u8, rn: u8, rm: u8) -> u32 {
+    let base = 0x9b007c00;
+    base | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+}
+
 fn ret() -> u32 {
     0xd65f03c0
 }
@@ -69,10 +74,28 @@ fn add_top_two_and_push() -> Vec<u32> {
     .collect()
 }
 
+fn mul_top_two_and_push() -> Vec<u32> {
+    vec![
+        pop_into_reg(1),
+        pop_into_reg(2),
+        vec![mul_reg_reg_reg(0, 1, 2)],
+        push_x0(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[derive(Copy, Clone, Debug)]
+enum Op {
+    Add,
+    Mul,
+}
+
 #[derive(Copy, Clone, Debug)]
 enum Token {
     Number(u16),
-    Plus,
+    Op(Op),
 }
 
 fn parse_expression(input: &str) -> IResult<&str, Vec<Token>> {
@@ -80,9 +103,12 @@ fn parse_expression(input: &str) -> IResult<&str, Vec<Token>> {
 }
 
 fn parse_token(input: &str) -> IResult<&str, Token> {
-    alt((map(parseu16, Token::Number), value(Token::Plus, char('+')))).parse(input)
+    alt((map(parseu16, Token::Number), map(parse_op, Token::Op))).parse(input)
 }
 
+fn parse_op(input: &str) -> IResult<&str, Op> {
+    alt((value(Op::Add, char('+')), value(Op::Mul, char('*')))).parse(input)
+}
 fn parseu16(input: &str) -> IResult<&str, u16> {
     map_res(digit1, |s: &str| s.parse::<u16>()).parse(input)
 }
@@ -136,7 +162,8 @@ fn main() {
     for item in expression {
         match item {
             Token::Number(x) => instructions.extend(push_literal(x)),
-            Token::Plus => instructions.extend(add_top_two_and_push()),
+            Token::Op(Op::Add) => instructions.extend(add_top_two_and_push()),
+            Token::Op(Op::Mul) => instructions.extend(mul_top_two_and_push()),
         }
     }
 
