@@ -2,9 +2,11 @@ use libc::{MAP_ANON, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE, mmap, mprote
 use nom::{
     IResult, Parser,
     branch::alt,
-    character::complete::{char, digit1, multispace1},
+    bytes::complete::tag,
+    character::complete::{char, digit1, multispace0, multispace1},
     combinator::{map, map_res, value},
-    multi::separated_list1,
+    multi::{many_till, separated_list1},
+    sequence::preceded,
 };
 use std::ptr;
 
@@ -25,6 +27,11 @@ fn add_reg_reg_reg(rd: u8, rn: u8, rm: u8) -> u32 {
 
 fn mul_reg_reg_reg(rd: u8, rn: u8, rm: u8) -> u32 {
     let base = 0x9b007c00;
+    base | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
+}
+
+fn sub_reg_reg_reg(rd: u8, rn: u8, rm: u8) -> u32 {
+    let base = 0xcb000000;
     base | ((rm as u32) << 16) | ((rn as u32) << 5) | (rd as u32)
 }
 
@@ -55,30 +62,22 @@ fn pop_into_reg(register: u8) -> Vec<u32> {
     ]
 }
 
+fn push_reg(register: u8) -> Vec<u32> {
+    vec![
+        0xd1002129,                     // sub x9, x9, 8
+        0xf9000120 | (register as u32), // str x{register}, [x9]
+    ]
+}
+
 fn push_x0() -> Vec<u32> {
-    vec![
-        0xd1002129, // sub x9, x9, 8
-        0xf9000120, // str x0, [x9]
-    ]
+    push_reg(0)
 }
 
-fn add_top_two_and_push() -> Vec<u32> {
+fn do_top_two_and_push(f: fn(u8, u8, u8) -> u32) -> Vec<u32> {
     vec![
-        pop_into_reg(1),
         pop_into_reg(2),
-        vec![add_reg_reg_reg(0, 1, 2)],
-        push_x0(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
-fn mul_top_two_and_push() -> Vec<u32> {
-    vec![
         pop_into_reg(1),
-        pop_into_reg(2),
-        vec![mul_reg_reg_reg(0, 1, 2)],
+        vec![f(0, 1, 2)],
         push_x0(),
     ]
     .into_iter()
@@ -90,27 +89,163 @@ fn mul_top_two_and_push() -> Vec<u32> {
 enum Op {
     Add,
     Mul,
+    Sub,
 }
 
-#[derive(Copy, Clone, Debug)]
-enum Token {
+#[derive(Clone, Debug)]
+enum Expr {
     Number(u16),
     Op(Op),
+    Loop(Vec<Expr>),
+    Dup,
+    Swap,
+    Over,
 }
 
-fn parse_expression(input: &str) -> IResult<&str, Vec<Token>> {
+fn parse_expression(input: &str) -> IResult<&str, Vec<Expr>> {
     separated_list1(multispace1, parse_token).parse(input)
 }
 
-fn parse_token(input: &str) -> IResult<&str, Token> {
-    alt((map(parseu16, Token::Number), map(parse_op, Token::Op))).parse(input)
+fn parse_token(input: &str) -> IResult<&str, Expr> {
+    alt((
+        map(parseu16, Expr::Number),
+        map(parse_op, Expr::Op),
+        parse_loop,
+        value(Expr::Dup, tag("dup")),
+        value(Expr::Swap, tag("swap")),
+        value(Expr::Over, tag("over")),
+    ))
+    .parse(input)
+}
+
+fn parse_loop(input: &str) -> IResult<&str, Expr> {
+    let (input, _) = tag("times")(input)?;
+    let (input, _) = multispace1(input)?;
+
+    let (input, body) = many_till(
+        preceded(multispace0, parse_token),
+        preceded(multispace0, tag("end")),
+    )
+    .parse(input)?;
+
+    Ok((input, Expr::Loop(body.0)))
 }
 
 fn parse_op(input: &str) -> IResult<&str, Op> {
-    alt((value(Op::Add, char('+')), value(Op::Mul, char('*')))).parse(input)
+    alt((
+        value(Op::Add, char('+')),
+        value(Op::Sub, char('-')),
+        value(Op::Mul, char('*')),
+    ))
+    .parse(input)
 }
+
 fn parseu16(input: &str) -> IResult<&str, u16> {
     map_res(digit1, |s: &str| s.parse::<u16>()).parse(input)
+}
+
+fn cbnz(by: i32) -> u32 {
+    let base = 0xb500000a;
+    let mask = 0x00ffffff;
+
+    base | (mask & ((by as u32) << 3))
+}
+
+fn interpret(expression: &Vec<Expr>, stack: &mut Vec<i32>) {
+    for item in expression {
+        match item {
+            Expr::Number(x) => {
+                stack.push(*x as i32);
+            }
+            Expr::Op(Op::Add) => {
+                let a = stack.pop().unwrap();
+                let b = stack.pop().unwrap();
+                stack.push(a + b);
+            }
+            Expr::Op(Op::Sub) => {
+                let a = stack.pop().unwrap();
+                let b = stack.pop().unwrap();
+                stack.push(b - a);
+            }
+            Expr::Op(Op::Mul) => {
+                let a = stack.pop().unwrap();
+                let b = stack.pop().unwrap();
+                stack.push(a * b);
+            }
+
+            Expr::Dup => {
+                let x = stack.pop().unwrap();
+                stack.push(x);
+                stack.push(x);
+            }
+
+            Expr::Swap => {
+                let a = stack.pop().unwrap();
+                let b = stack.pop().unwrap();
+                stack.push(a);
+                stack.push(b);
+            }
+
+            Expr::Over => {
+                let a = stack.pop().unwrap();
+                let b = stack.pop().unwrap();
+                stack.push(b);
+                stack.push(a);
+                stack.push(b);
+            }
+
+            Expr::Loop(body) => {
+                let times = stack.pop().unwrap();
+                for _idx in 0..times {
+                    interpret(body, stack);
+                }
+            }
+        }
+    }
+}
+
+fn codegen(expression: &Vec<Expr>, output: &mut Vec<u32>) {
+    for item in expression {
+        match item {
+            Expr::Number(x) => output.extend(push_literal(*x)),
+            Expr::Op(Op::Add) => output.extend(do_top_two_and_push(add_reg_reg_reg)),
+            Expr::Op(Op::Mul) => output.extend(do_top_two_and_push(mul_reg_reg_reg)),
+            Expr::Op(Op::Sub) => output.extend(do_top_two_and_push(sub_reg_reg_reg)),
+            Expr::Dup => {
+                output.extend(pop_into_reg(0));
+                output.extend(push_x0());
+                output.extend(push_x0());
+            }
+
+            Expr::Swap => {
+                output.extend(pop_into_reg(0));
+                output.extend(pop_into_reg(1));
+                output.extend(push_reg(0));
+                output.extend(push_reg(1));
+            }
+
+            Expr::Over => {
+                output.extend(pop_into_reg(0));
+                output.extend(pop_into_reg(1));
+                output.extend(push_reg(1));
+                output.extend(push_reg(0));
+                output.extend(push_reg(1));
+            }
+            Expr::Loop(body) => {
+                output.extend(pop_into_reg(10));
+
+                let loop_start_offset = output.len() as i32;
+                output.push(mov_immediate(11, 1));
+                output.push(sub_reg_reg_reg(10, 10, 11));
+
+                codegen(&body, output);
+
+                let loop_end_offset = output.len() as i32;
+                let jump = cbnz(4 * (loop_start_offset - loop_end_offset));
+                output.push(jump);
+            }
+        }
+    }
 }
 
 fn main() {
@@ -119,9 +254,27 @@ fn main() {
         .read_line(&mut input)
         .expect("failed to read line");
 
-    let (_remainder, expression) = parse_expression(input.trim()).unwrap();
+    let (remainder, expression) = parse_expression(input.trim()).unwrap();
 
-    println!("{:?}", expression);
+    println!(
+        "Thank you for giving me a program to run. I understand it as:\n{:?}",
+        expression
+    );
+    if remainder.trim().len() > 0 {
+        println!(
+            "There was some stuff at the end I couldn't parse: {}",
+            remainder
+        );
+
+        return;
+    }
+
+    println!("\nFirst let's interpret your program. Whirr brr..\n");
+    let mut stack = Vec::new();
+    interpret(&expression, &mut stack);
+    let interpreted_result = stack.pop().unwrap();
+    println!("All done! The answer is {}", interpreted_result);
+
     let size = 4096;
 
     let code_ptr = unsafe {
@@ -159,18 +312,20 @@ fn main() {
     let mov_x9_x0 = 0xaa0003e9;
     instructions.push(mov_x9_x0);
 
-    for item in expression {
-        match item {
-            Token::Number(x) => instructions.extend(push_literal(x)),
-            Token::Op(Op::Add) => instructions.extend(add_top_two_and_push()),
-            Token::Op(Op::Mul) => instructions.extend(mul_top_two_and_push()),
-        }
-    }
+    codegen(&expression, &mut instructions);
 
     // The final result will be at the top of the stack. Pop that result into x0
     // and return it.
     instructions.extend(pop_into_reg(0));
     instructions.push(ret());
+
+    println!("\nHere's the raw arm64 machine code for your code:");
+
+    for instruction in instructions.iter() {
+        print!("{:#x} ", instruction);
+    }
+
+    println!("\n\nNOW LET'S RUN IT FOR REAL! WAHOO!!\n");
 
     unsafe {
         std::ptr::copy_nonoverlapping(
@@ -194,4 +349,10 @@ fn main() {
     let result = unsafe { jit_fn(stack_top as *mut u8) };
 
     println!("Answer: {}", result);
+
+    if interpreted_result as i64 == result {
+        println!("Things are going well. JIT result == interpreted result.");
+    } else {
+        println!("Bad stuff. Interpreter disagrees with JIT.");
+    }
 }
