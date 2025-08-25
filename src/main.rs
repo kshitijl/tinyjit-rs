@@ -1,9 +1,15 @@
 use libc::{MAP_ANON, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE, mmap, mprotect};
+use nom::{
+    IResult, Parser,
+    branch::alt,
+    character::complete::{char, digit1, multispace1},
+    combinator::{map, map_res, value},
+    multi::separated_list1,
+};
 use std::ptr;
 
 unsafe extern "C" {
     fn __clear_cache(start: *const u8, end: *const u8);
-    // fn sys_icache_invalidate(start: *const libc::c_void, size: libc::size_t);
 }
 
 fn mov_immediate(register: u8, value: u16) -> u32 {
@@ -58,7 +64,34 @@ fn add_top_two_into_x0() -> Vec<u32> {
     .flatten()
     .collect()
 }
+
+#[derive(Copy, Clone, Debug)]
+enum Token {
+    Number(u16),
+    Plus,
+}
+
+fn parse_expression(input: &str) -> IResult<&str, Vec<Token>> {
+    separated_list1(multispace1, parse_token).parse(input)
+}
+
+fn parse_token(input: &str) -> IResult<&str, Token> {
+    alt((map(parseu16, Token::Number), value(Token::Plus, char('+')))).parse(input)
+}
+
+fn parseu16(input: &str) -> IResult<&str, u16> {
+    map_res(digit1, |s: &str| s.parse::<u16>()).parse(input)
+}
+
 fn main() {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .expect("failed to read line");
+
+    let (_remainder, expression) = parse_expression(input.trim()).unwrap();
+
+    println!("{:?}", expression);
     let size = 4096;
 
     let code_ptr = unsafe {
@@ -93,9 +126,13 @@ fn main() {
     // their stack.
     let mov_x9_x0 = 0xaa0003e9;
     instructions.push(mov_x9_x0);
-    instructions.extend(push_literal(1));
-    instructions.extend(push_literal(41));
-    instructions.extend(add_top_two_into_x0());
+
+    for item in expression {
+        match item {
+            Token::Number(x) => instructions.extend(push_literal(x)),
+            Token::Plus => instructions.extend(add_top_two_into_x0()),
+        }
+    }
     instructions.push(ret());
 
     unsafe {
