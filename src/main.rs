@@ -203,7 +203,7 @@ mod parsing {
     }
 }
 
-fn interpret(expression: &Vec<Expr>, stack: &mut Vec<i32>) {
+fn interpret_inner(expression: &Vec<Expr>, stack: &mut Vec<i32>) {
     for item in expression {
         match item {
             Expr::Number(x) => {
@@ -249,9 +249,43 @@ fn interpret(expression: &Vec<Expr>, stack: &mut Vec<i32>) {
             Expr::Loop(body) => {
                 let times = stack.pop().unwrap();
                 for _idx in 0..times {
-                    interpret(body, stack);
+                    interpret_inner(body, stack);
                 }
             }
+        }
+    }
+}
+
+fn interpret(expression: &Vec<Expr>) -> i32 {
+    let mut stack = Vec::new();
+    interpret_inner(&expression, &mut stack);
+    stack.pop().unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_works() {
+        let tests = [
+            ("1 1 +", 2),
+            ("1 1 + 1 +", 3),
+            ("2 3 *", 6),
+            ("1 dup +", 2),
+            ("5 2 -", 3),
+            ("2 5 -", -3),
+            ("2 5 swap -", 3),
+            ("1 2 over + +", 4),
+            ("1 5 times 1 + end", 6),
+            ("1 5 times 2 * end", 32),
+            ("1 1 5 times swap over * swap 1 + end swap", 120),
+            ("1 1 6 times swap over * swap 1 + end swap", 720),
+        ];
+
+        for (program, result) in tests {
+            let expr = parsing::parse_expression(program).unwrap().1;
+            assert_eq!(interpret(&expr), result);
         }
     }
 }
@@ -278,9 +312,7 @@ fn main() {
     }
 
     println!("\nFirst let's interpret your program. Whirr brr..\n");
-    let mut stack = Vec::new();
-    interpret(&expression, &mut stack);
-    let interpreted_result = stack.pop().unwrap();
+    let interpreted_result = interpret(&expression);
     println!("All done! The answer is {}", interpreted_result);
 
     let size = 4096;
