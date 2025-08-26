@@ -410,35 +410,46 @@ fn main() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn it_works() {
-        let tests = [
-            ("1 1 +", 2),
-            ("1 1 + 1 +", 3),
-            ("2 3 *", 6),
-            ("1 dup +", 2),
-            ("5 2 -", 3),
-            ("2 5 -", -3),
-            ("2 5 swap -", 3),
-            ("1 2 over + +", 4),
-            ("1 5 times 1 + end", 6),
-            ("1 5 times 2 * end", 32),
-            ("1 1 5 times swap over * swap 1 + end swap", 120),
-            ("1 1 6 times swap over * swap 1 + end swap", 720),
-        ];
+    const TEST_CASES: &[(&str, i32)] = &[
+        ("1 1 +", 2),
+        ("1 1 + 1 +", 3),
+        ("2 3 *", 6),
+        ("1 dup +", 2),
+        ("5 2 -", 3),
+        ("2 5 -", -3),
+        ("2 5 swap -", 3),
+        ("1 2 over + +", 4),
+        ("1 5 times 1 + end", 6),
+        ("1 5 times 2 * end", 32),
+        ("1 1 5 times swap over * swap 1 + end swap", 120),
+        ("1 1 6 times swap over * swap 1 + end swap", 720),
+    ];
 
-        for (program, result) in tests {
-            // Test parsing
+    #[test]
+    fn interpret_works() {
+        for (program, result) in TEST_CASES {
             let expr = parsing::parse_expression(program).unwrap().1;
 
-            // Test that jit exec'd == interpreted
-            assert_eq!(interpret(&expr), result);
-            assert_eq!(jit_execute(&expr), result);
+            assert_eq!(interpret(&expr), *result);
+        }
+    }
 
-            // Test that we can rerun jit compiled code many times
+    #[test]
+    fn jit_exec_works() {
+        for (program, result) in TEST_CASES {
+            let expr = parsing::parse_expression(program).unwrap().1;
+            assert_eq!(jit_execute(&expr), *result);
+        }
+    }
+
+    #[test]
+    fn compile_once_exec_many_times_works() {
+        for (program, result) in TEST_CASES {
+            let expr = parsing::parse_expression(program).unwrap().1;
+
             let j = JitCompiledCode::new(&expr);
             for _i in 0..10_000 {
-                assert_eq!(j.execute(), result);
+                assert_eq!(j.execute(), *result);
             }
         }
     }
