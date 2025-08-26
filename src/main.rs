@@ -262,59 +262,7 @@ fn interpret(expression: &Vec<Expr>) -> i32 {
     stack.pop().unwrap()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let tests = [
-            ("1 1 +", 2),
-            ("1 1 + 1 +", 3),
-            ("2 3 *", 6),
-            ("1 dup +", 2),
-            ("5 2 -", 3),
-            ("2 5 -", -3),
-            ("2 5 swap -", 3),
-            ("1 2 over + +", 4),
-            ("1 5 times 1 + end", 6),
-            ("1 5 times 2 * end", 32),
-            ("1 1 5 times swap over * swap 1 + end swap", 120),
-            ("1 1 6 times swap over * swap 1 + end swap", 720),
-        ];
-
-        for (program, result) in tests {
-            let expr = parsing::parse_expression(program).unwrap().1;
-            assert_eq!(interpret(&expr), result);
-        }
-    }
-}
-
-fn main() {
-    let mut input = String::new();
-    std::io::stdin()
-        .read_line(&mut input)
-        .expect("failed to read line");
-
-    let (remainder, expression) = parsing::parse_expression(input.trim()).unwrap();
-
-    println!(
-        "Thank you for giving me a program to run. I understand it as:\n{:?}",
-        expression
-    );
-    if remainder.trim().len() > 0 {
-        println!(
-            "There was some stuff at the end I couldn't parse: {}",
-            remainder
-        );
-
-        return;
-    }
-
-    println!("\nFirst let's interpret your program. Whirr brr..\n");
-    let interpreted_result = interpret(&expression);
-    println!("All done! The answer is {}", interpreted_result);
-
+fn jit_execute(expression: &Vec<Expr>) -> i32 {
     let size = 4096;
 
     let code_ptr = unsafe {
@@ -388,11 +336,69 @@ fn main() {
 
     let result = unsafe { jit_fn(stack_top as *mut u8) };
 
-    println!("Answer: {}", result);
+    result as i32
+}
 
-    if interpreted_result as i64 == result {
+fn main() {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .expect("failed to read line");
+
+    let (remainder, expression) = parsing::parse_expression(input.trim()).unwrap();
+
+    println!(
+        "Thank you for giving me a program to run. I understand it as:\n{:?}",
+        expression
+    );
+    if remainder.trim().len() > 0 {
+        println!(
+            "There was some stuff at the end I couldn't parse: {}",
+            remainder
+        );
+
+        return;
+    }
+
+    println!("\nFirst let's interpret your program. Whirr brr..\n");
+    let interpreted_result = interpret(&expression);
+    println!("All done! The answer is {}", interpreted_result);
+
+    let jit_result = jit_execute(&expression);
+    println!("Answer: {}", jit_result);
+
+    if interpreted_result == jit_result {
         println!("Things are going well. JIT result == interpreted result.");
     } else {
         println!("Bad stuff. Interpreter disagrees with JIT.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_works() {
+        let tests = [
+            ("1 1 +", 2),
+            ("1 1 + 1 +", 3),
+            ("2 3 *", 6),
+            ("1 dup +", 2),
+            ("5 2 -", 3),
+            ("2 5 -", -3),
+            ("2 5 swap -", 3),
+            ("1 2 over + +", 4),
+            ("1 5 times 1 + end", 6),
+            ("1 5 times 2 * end", 32),
+            ("1 1 5 times swap over * swap 1 + end swap", 120),
+            ("1 1 6 times swap over * swap 1 + end swap", 720),
+        ];
+
+        for (program, result) in tests {
+            let expr = parsing::parse_expression(program).unwrap().1;
+            assert_eq!(interpret(&expr), result);
+            assert_eq!(jit_execute(&expr), result);
+        }
     }
 }
