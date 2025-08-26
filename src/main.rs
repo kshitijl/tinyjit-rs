@@ -136,7 +136,7 @@ mod arm64 {
                     output.push(mov_immediate(11, 1));
                     output.push(sub_reg_reg_reg(10, 10, 11));
 
-                    codegen(&body, output);
+                    codegen(body, output);
 
                     let loop_end_offset = output.len() as i32;
                     let jump = cbnz(4 * (loop_start_offset - loop_end_offset));
@@ -258,7 +258,7 @@ fn interpret_inner(expression: &Vec<Expr>, stack: &mut Vec<i32>) {
 
 fn interpret(expression: &Vec<Expr>) -> i32 {
     let mut stack = Vec::new();
-    interpret_inner(&expression, &mut stack);
+    interpret_inner(expression, &mut stack);
     stack.pop().unwrap()
 }
 
@@ -294,7 +294,7 @@ impl JitCompiledCode {
         let mov_x9_x0 = 0xaa0003e9;
         instructions.push(mov_x9_x0);
 
-        arm64::codegen(&expression, &mut instructions);
+        arm64::codegen(expression, &mut instructions);
 
         // The final result will be at the top of the stack. Pop that result into x0
         // and return it.
@@ -348,7 +348,7 @@ impl JitCompiledCode {
 
         let jit_fn: JitFn = unsafe { std::mem::transmute(self.code_ptr) };
 
-        let result = unsafe { jit_fn(stack_top as *mut u8) };
+        let result = unsafe { jit_fn(stack_top) };
 
         result as i32
     }
@@ -382,7 +382,8 @@ fn main() {
         "Thank you for giving me a program to run. I understand it as:\n{:?}",
         expression
     );
-    if remainder.trim().len() > 0 {
+
+    if !remainder.trim().is_empty() {
         println!(
             "There was some stuff at the end I couldn't parse: {}",
             remainder
