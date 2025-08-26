@@ -262,81 +262,112 @@ fn interpret(expression: &Vec<Expr>) -> i32 {
     stack.pop().unwrap()
 }
 
-fn jit_execute(expression: &Vec<Expr>) -> i32 {
-    let size = 4096;
+struct JitCompiledCode {
+    code_ptr: *mut libc::c_void,
+    code_size: usize,
+    stack_ptr: *mut libc::c_void,
+    stack_size: usize,
+}
 
-    let code_ptr = unsafe {
-        mmap(
-            ptr::null_mut(),
-            size,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANON,
-            -1,
-            0,
-        )
-    };
+impl JitCompiledCode {
+    fn new(expression: &Vec<Expr>) -> Self {
+        let code_size = 4096;
 
-    let stack_size = 4096;
-    let stack_ptr = unsafe {
-        mmap(
-            ptr::null_mut(),
+        let code_ptr = unsafe {
+            mmap(
+                ptr::null_mut(),
+                code_size,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        //
+        let mut instructions: Vec<u32> = Vec::new();
+        // The JIT function is called with the stack we allocated for its use. The
+        // very first instruction we execute takes that argument from x0 and puts
+        // it in x9. The rest of the instructions will use register x9 as the top of
+        // their stack. I did this because manipulating sp would segfault. Literally
+        // even subtracting from it: "sub sp, sp, #8" would segfault. So we allocate
+        // our own memory for the stack and pass it in.
+        let mov_x9_x0 = 0xaa0003e9;
+        instructions.push(mov_x9_x0);
+
+        arm64::codegen(&expression, &mut instructions);
+
+        // The final result will be at the top of the stack. Pop that result into x0
+        // and return it.
+        instructions.extend(arm64::pop_into_reg(0));
+        instructions.push(arm64::ret());
+
+        println!("\nHere's the raw arm64 machine code for your code:");
+
+        for instruction in instructions.iter() {
+            print!("{:#x} ", instruction);
+        }
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                instructions.as_ptr() as *const u8,
+                code_ptr as *mut u8,
+                instructions.len() * 4,
+            );
+        }
+
+        unsafe {
+            let as_u8: *const u8 = std::mem::transmute(code_ptr);
+            __clear_cache(as_u8, as_u8.add(code_size));
+            mprotect(code_ptr, code_size, PROT_READ | PROT_EXEC);
+        }
+
+        let stack_size = 4096;
+        let stack_ptr = unsafe {
+            mmap(
+                ptr::null_mut(),
+                stack_size,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON,
+                -1,
+                0,
+            )
+        };
+
+        Self {
+            code_ptr,
+            stack_ptr,
             stack_size,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANON,
-            -1,
-            0,
-        )
-    };
-
-    let stack_top = unsafe { (stack_ptr as *mut u8).add(stack_size) };
-
-    let mut instructions: Vec<u32> = Vec::new();
-    // The JIT function is called with the stack we allocated for its use. The
-    // very first instruction we execute takes that argument from x0 and puts
-    // it in x9. The rest of the instructions will use register x9 as the top of
-    // their stack. I did this because manipulating sp would segfault. Literally
-    // even subtracting from it: "sub sp, sp, #8" would segfault. So we allocate
-    // our own memory for the stack and pass it in.
-    let mov_x9_x0 = 0xaa0003e9;
-    instructions.push(mov_x9_x0);
-
-    arm64::codegen(&expression, &mut instructions);
-
-    // The final result will be at the top of the stack. Pop that result into x0
-    // and return it.
-    instructions.extend(arm64::pop_into_reg(0));
-    instructions.push(arm64::ret());
-
-    println!("\nHere's the raw arm64 machine code for your code:");
-
-    for instruction in instructions.iter() {
-        print!("{:#x} ", instruction);
+            code_size,
+        }
     }
 
+    fn execute(&self) -> i32 {
+        let stack_top = unsafe { (self.stack_ptr as *mut u8).add(self.stack_size) };
+
+        type JitFn = unsafe extern "C" fn(*mut u8) -> i64;
+
+        let jit_fn: JitFn = unsafe { std::mem::transmute(self.code_ptr) };
+
+        let result = unsafe { jit_fn(stack_top as *mut u8) };
+
+        result as i32
+    }
+}
+
+impl Drop for JitCompiledCode {
+    fn drop(&mut self) {
+        println!("Cleaning up JIT memory...");
+        unsafe {
+            libc::munmap(self.code_ptr, self.code_size);
+            libc::munmap(self.stack_ptr, self.stack_size);
+        }
+    }
+}
+
+fn jit_execute(expression: &Vec<Expr>) -> i32 {
+    let j = JitCompiledCode::new(expression);
     println!("\n\nNOW LET'S RUN IT FOR REAL! WAHOO!!\n");
-
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            instructions.as_ptr() as *const u8,
-            code_ptr as *mut u8,
-            instructions.len() * 4,
-        );
-    }
-
-    unsafe {
-        let as_u8: *const u8 = std::mem::transmute(code_ptr);
-        __clear_cache(as_u8, as_u8.add(size));
-        // sys_icache_invalidate(memory, size);
-        mprotect(code_ptr, size, PROT_READ | PROT_EXEC);
-    }
-
-    type JitFn = unsafe extern "C" fn(*mut u8) -> i64;
-
-    let jit_fn: JitFn = unsafe { std::mem::transmute(code_ptr) };
-
-    let result = unsafe { jit_fn(stack_top as *mut u8) };
-
-    result as i32
+    j.execute()
 }
 
 fn main() {
@@ -396,9 +427,18 @@ mod tests {
         ];
 
         for (program, result) in tests {
+            // Test parsing
             let expr = parsing::parse_expression(program).unwrap().1;
+
+            // Test that jit exec'd == interpreted
             assert_eq!(interpret(&expr), result);
             assert_eq!(jit_execute(&expr), result);
+
+            // Test that we can rerun jit compiled code many times
+            let j = JitCompiledCode::new(&expr);
+            for _i in 0..10_000 {
+                assert_eq!(j.execute(), result);
+            }
         }
     }
 }
